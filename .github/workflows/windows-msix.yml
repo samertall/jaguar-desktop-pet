@@ -50,6 +50,28 @@ jobs:
           $report = Join-Path (Get-Location) 'build\\CI-GUI-RESULT.txt'
           New-Item -ItemType Directory -Path build -Force | Out-Null
           $env:JAGUAR_GUI_SMOKE_REPORT = $report
+          # All changes below are confined to the disposable GitHub-hosted VM.
+          try {
+            if (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue) {
+              Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+            }
+          } catch { Write-Warning "Could not increase GitHub runner display resolution: $_" }
+          $backgroundApp = $null
+          try {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class JaguarWindowHelpers {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
+}
+'@
+            $backgroundApp = Start-Process notepad.exe -PassThru
+            Start-Sleep -Milliseconds 850
+            $backgroundApp.Refresh()
+            if ($backgroundApp.MainWindowHandle -ne [IntPtr]::Zero) {
+              [JaguarWindowHelpers]::ShowWindow($backgroundApp.MainWindowHandle, 3) | Out-Null
+            }
+          } catch { Write-Warning "Clean background app unavailable: $_" }
           $p = Start-Process -FilePath (Resolve-Path .\\app\\JaguarPet.exe) -ArgumentList '--ci-gui-smoke' -PassThru
           try {
             Start-Sleep -Seconds 1
@@ -75,6 +97,7 @@ jobs:
             if (!$text.Contains('passed=true')) { throw "GUI smoke result not passed: $text" }
           } finally {
             if (!$p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $backgroundApp -and !$backgroundApp.HasExited) { Stop-Process -Id $backgroundApp.Id -Force -ErrorAction SilentlyContinue }
           }
       - name: Package with official Windows SDK MakeAppx and unpack-test
         shell: pwsh
