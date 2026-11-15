@@ -1,0 +1,69 @@
+name: Windows build and MSIX validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-validate:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.mod
+      - name: Unit tests and static analysis (Windows)
+        working-directory: app
+        shell: pwsh
+        run: |
+          go version
+          go vet ./...
+          go test -v ./...
+      - name: Build and test a non-GUI diagnostics executable
+        working-directory: app
+        shell: pwsh
+        run: |
+          go build -trimpath -o JaguarPet-CI.exe .
+          & .\JaguarPet-CI.exe --ci-selftest
+          if ($LASTEXITCODE -ne 0) { throw "CI runtime self-test failed: $LASTEXITCODE" }
+          Remove-Item .\JaguarPet-CI.exe -Force
+      - name: Compile Windows GUI executable
+        working-directory: app
+        shell: pwsh
+        run: |
+          go build -trimpath -ldflags='-H windowsgui' -o JaguarPet.exe .
+          if (!(Test-Path JaguarPet.exe)) { throw 'JaguarPet.exe was not created' }
+          Get-Item JaguarPet.exe | Format-Table Name,Length
+      - name: Package with official Windows SDK MakeAppx and unpack-test
+        shell: pwsh
+        run: |
+          .\scripts\build-store-package.ps1
+      - name: Verify package publisher and executable (offline)
+        shell: pwsh
+        run: |
+          [xml]$manifest = Get-Content .\makeappx-validation-unpacked\AppxManifest.xml -Raw
+          $id = $manifest.Package.Identity
+          if ($id.Name -cne 'SamerTallauze.JaguarDesktopPet') { throw 'Unexpected Identity Name' }
+          if ($id.Publisher -cne 'CN=C83AFC34-5CE3-4E0A-8DCD-9733097BE6AC') { throw 'Unexpected Publisher' }
+          if ($id.ProcessorArchitecture -cne 'x64') { throw 'Unexpected Architecture' }
+          if (!(Test-Path .\makeappx-validation-unpacked\JaguarPet.exe)) { throw 'EXE not present in unpacked package' }
+          Get-FileHash .\build\*_OFFICIAL_MAKEAPPX_UNSIGNED.msix -Algorithm SHA256 | Format-List
+          'CI PASS: Windows compilation, unit tests, non-GUI motion/assets, MSIX pack/unpack and manifest checks.' | Set-Content -Path .\build\CI-RESULT.txt
+      - name: Upload unsigned MSIX for Partner Center review
+        uses: actions/upload-artifact@v4
+        with:
+          name: jaguar-store-candidate-unsigned-${{ github.run_number }}
+          path: |
+            build/*_OFFICIAL_MAKEAPPX_UNSIGNED.msix
+            build/CI-RESULT.txt
+          if-no-files-found: error
+          retention-days: 14
