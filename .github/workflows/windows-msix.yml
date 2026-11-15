@@ -43,6 +43,62 @@ jobs:
           go build -trimpath -ldflags='-H windowsgui' -o JaguarPet.exe .
           if (!(Test-Path JaguarPet.exe)) { throw 'JaguarPet.exe was not created' }
           Get-Item JaguarPet.exe | Format-Table Name,Length
+      - name: Smoke-test Windows overlay, animation timer and window visibility
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path (Get-Location) 'build\\CI-GUI-RESULT.txt'
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          $env:JAGUAR_GUI_SMOKE_REPORT = $report
+          # All changes below are confined to the disposable GitHub-hosted VM.
+          try {
+            if (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue) {
+              Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+            }
+          } catch { Write-Warning "Could not increase GitHub runner display resolution: $_" }
+          $backgroundApp = $null
+          try {
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class JaguarWindowHelpers {
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
+          }
+          '@
+            $backgroundApp = Start-Process notepad.exe -PassThru
+            Start-Sleep -Milliseconds 850
+            $backgroundApp.Refresh()
+            if ($backgroundApp.MainWindowHandle -ne [IntPtr]::Zero) {
+              [JaguarWindowHelpers]::ShowWindow($backgroundApp.MainWindowHandle, 3) | Out-Null
+            }
+          } catch { Write-Warning "Clean background app unavailable: $_" }
+          $p = Start-Process -FilePath (Resolve-Path .\\app\\JaguarPet.exe) -ArgumentList '--ci-gui-smoke' -PassThru
+          try {
+            Start-Sleep -Seconds 1
+            # Optional debugging screenshot: this is NOT a Store screenshot.
+            try {
+              Add-Type -AssemblyName System.Windows.Forms
+              Add-Type -AssemblyName System.Drawing
+              $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try {
+                $graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+                $bitmap.Save((Join-Path (Get-Location) 'build\\CI-DESKTOP-DEBUG.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+              } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            } catch { Write-Warning "Screen capture unavailable in CI session: $_" }
+            $deadline = (Get-Date).AddSeconds(18)
+            while (!$p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300; $p.Refresh() }
+            if (!$p.HasExited) { throw 'GUI smoke timed out: window/timer may not have initialized' }
+            if ($p.ExitCode -ne 0) { throw "GUI smoke exited with code $($p.ExitCode)" }
+            if (!(Test-Path $report)) { throw 'GUI smoke did not produce a report' }
+            $text = Get-Content $report -Raw
+            Write-Host $text
+            if (!$text.Contains('passed=true')) { throw "GUI smoke result not passed: $text" }
+          } finally {
+            if (!$p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $backgroundApp -and !$backgroundApp.HasExited) { Stop-Process -Id $backgroundApp.Id -Force -ErrorAction SilentlyContinue }
+          }
       - name: Package with official Windows SDK MakeAppx and unpack-test
         shell: pwsh
         run: |
@@ -65,5 +121,7 @@ jobs:
           path: |
             build/*_OFFICIAL_MAKEAPPX_UNSIGNED.msix
             build/CI-RESULT.txt
+            build/CI-GUI-RESULT.txt
+            build/CI-DESKTOP-DEBUG.png
           if-no-files-found: error
           retention-days: 14
