@@ -58,6 +58,8 @@ var (
 	pDestroyMenu           = user32.NewProc("DestroyMenu")
 	pGetCursorPos          = user32.NewProc("GetCursorPos")
 	pSetForeground         = user32.NewProc("SetForegroundWindow")
+	pIsWindowVisible       = user32.NewProc("IsWindowVisible")
+	pGetWindowRect         = user32.NewProc("GetWindowRect")
 	pPostMessage           = user32.NewProc("PostMessageW")
 	pCreateDC              = gdi32.NewProc("CreateCompatibleDC")
 	pDeleteDC              = gdi32.NewProc("DeleteDC")
@@ -216,6 +218,11 @@ type application struct {
 	trayAdded                                    bool
 	taskbarMsg                                   uint32
 	failures                                     int
+	guiSmoke                                     bool
+	smokeInitialX                                float64
+	smokeInitialFrame                            int
+	smokeFrameChanged                            bool
+	smokePassed                                  bool
 }
 
 func (a *application) getWorkArea() {
@@ -550,6 +557,26 @@ func (a *application) tick() {
 		return
 	}
 	a.ticks++
+	if a.guiSmoke {
+		if a.w.FrameIndex != a.smokeInitialFrame {
+			a.smokeFrameChanged = true
+		}
+		if a.ticks >= 65 {
+			visible, _, _ := pIsWindowVisible.Call(a.hwnd)
+			bounds := rect{}
+			gotBounds, _, _ := pGetWindowRect.Call(a.hwnd, uintptr(unsafe.Pointer(&bounds)))
+			moved := math.Abs(a.w.X-a.smokeInitialX) > 8
+			validBounds := gotBounds != 0 && bounds.Right > bounds.Left && bounds.Bottom > bounds.Top
+			a.smokePassed = a.failures == 0 && moved && a.smokeFrameChanged && visible != 0 && validBounds
+			result := fmt.Sprintf("GUI smoke: passed=%v ticks=%d moved=%v frames_changed=%v visible=%v bounds_valid=%v rendered_failures=%d start_x=%.1f end_x=%.1f\\n", a.smokePassed, a.ticks, moved, a.smokeFrameChanged, visible != 0, validBounds, a.failures, a.smokeInitialX, a.w.X)
+			report := os.Getenv("JAGUAR_GUI_SMOKE_REPORT")
+			if report == "" { report = filepath.Join(os.TempDir(), "jaguar-gui-smoke.txt") }
+			_ = os.WriteFile(report, []byte(result), 0644)
+			logMessage("%s", strings.TrimSpace(result))
+			pDestroyWindow.Call(a.hwnd)
+			return
+		}
+	}
 	if a.ticks == 1 || a.ticks == 30 || a.ticks == 150 {
 		logMessage("ANIMATING tick=%d x=%.0f frame=%d behavior=%s direction=%v", a.ticks, a.w.X, a.w.FrameIndex, a.w.State.String(), a.w.Direction)
 	}
@@ -616,6 +643,7 @@ func run() error {
 	runtime.LockOSThread()
 	pSetDPIAware.Call()
 	app = &application{imgW: 426, imgH: 260, rng: rand.New(rand.NewSource(time.Now().UnixNano()))}
+	app.guiSmoke = len(os.Args) > 1 && strings.EqualFold(os.Args[1], "--ci-gui-smoke")
 	if e := app.loadFrames(); e != nil {
 		return e
 	}
@@ -625,6 +653,8 @@ func run() error {
 	app.getWorkArea()
 	startX := math.Max(float64(app.work.Left), float64(app.work.Left)+65)
 	app.w = NewWalker(startX)
+	app.smokeInitialX = app.w.X
+	app.smokeInitialFrame = app.w.FrameIndex
 	hInstance, _, _ := pGetModuleHandle.Call(0)
 	className := utf16("JaguarDesktopPetOverlayV4")
 	wc := wndClassEx{Style: 0, WndProc: syscall.NewCallback(windowProc), Instance: hInstance, ClassName: className}
@@ -728,8 +758,15 @@ func main() {
 		return
 	}
 	logMessage("Store Edition native desktop build 0.1")
+	guiSmoke := len(os.Args) > 1 && strings.EqualFold(os.Args[1], "--ci-gui-smoke")
 	if e := run(); e != nil {
 		logMessage("STARTUP ERROR: %s", e)
+		if guiSmoke {
+			report := os.Getenv("JAGUAR_GUI_SMOKE_REPORT")
+			if report != "" { _ = os.WriteFile(report, []byte("GUI smoke startup failed: "+e.Error()+"\n"), 0644) }
+			os.Exit(2)
+		}
 		msgbox("Jaguar Desktop Pet - startup error", "Jaguar could not start:\n\n"+e.Error()+"\n\nLog file: "+logPath)
 	}
+	if guiSmoke && (app == nil || !app.smokePassed) { os.Exit(3) }
 }
