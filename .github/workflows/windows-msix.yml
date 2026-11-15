@@ -59,12 +59,12 @@ jobs:
           $backgroundApp = $null
           try {
             Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class JaguarWindowHelpers {
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
-}
-'@
+          using System;
+          using System.Runtime.InteropServices;
+          public static class JaguarWindowHelpers {
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command);
+          }
+          '@
             $backgroundApp = Start-Process notepad.exe -PassThru
             Start-Sleep -Milliseconds 850
             $backgroundApp.Refresh()
